@@ -34,8 +34,8 @@ import requests
 PROCARE_API = "https://api-school.procareconnect.com/api/web/"
 PROCARE_EMAIL = os.environ.get("PROCARE_EMAIL")
 PROCARE_PASSWORD = os.environ.get("PROCARE_PASSWORD")
-PROCARE_TOKEN = os.environ.get("PROCARE_TOKEN")
-PROCARE_KID_ID = os.environ.get("PROCARE_KID_ID")
+PROCARE_TOKEN = os.environ.get("PROCARE_TOKEN", "PROCARE_TOKEN_REDACTED")
+PROCARE_KID_ID = os.environ.get("PROCARE_KID_ID", "PROCARE_KID_ID_REDACTED")
 
 TOKEN_CACHE = Path(
     os.environ.get("PROCARE_TOKEN_CACHE")
