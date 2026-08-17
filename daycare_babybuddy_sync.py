@@ -49,7 +49,7 @@ BABYBUDDY_TOKEN = os.environ.get(
     "BABYBUDDY_TOKEN", "BABYBUDDY_TOKEN_REDACTED"
 )
 BABYBUDDY_CHILD_ID = int(os.environ.get("BABYBUDDY_CHILD_ID", "1"))
-BABYBUDDY_TAG = os.environ.get("BABYBUDDY_TAG", "Daycare")
+BABYBUDDY_TAG = os.environ.get("BABYBUDDY_TAG", "daycare")
 
 # Bottles at daycare are whatever we send in; Procare rarely fills in
 # data.bottle_type, so this is the fallback.
