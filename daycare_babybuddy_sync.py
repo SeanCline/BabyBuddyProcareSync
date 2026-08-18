@@ -31,36 +31,30 @@ import requests
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROCARE_API = "https://api-school.procareconnect.com/api/web/"
+PROCARE_API = os.environ.get("PROCARE_API", "https://api-school.procareconnect.com/api/web/")
 PROCARE_EMAIL = os.environ.get("PROCARE_EMAIL")
 PROCARE_PASSWORD = os.environ.get("PROCARE_PASSWORD")
-PROCARE_TOKEN = os.environ.get("PROCARE_TOKEN", "PROCARE_TOKEN_REDACTED")
-PROCARE_KID_ID = os.environ.get("PROCARE_KID_ID", "PROCARE_KID_ID_REDACTED")
+PROCARE_TOKEN = os.environ.get("PROCARE_TOKEN")
+PROCARE_KID_ID = os.environ.get("PROCARE_KID_ID")
 
-TOKEN_CACHE = Path(
-    os.environ.get("PROCARE_TOKEN_CACHE")
-    or Path.home() / ".procare-babybuddy-token.json"
-)
+SCRIPT_DIR = Path(__file__).resolve().parent
 
-BABYBUDDY_URL = os.environ.get(
-    "BABYBUDDY_URL", "http://babybuddy.example.com:8000/"
-).rstrip("/")
-BABYBUDDY_TOKEN = os.environ.get(
-    "BABYBUDDY_TOKEN", "BABYBUDDY_TOKEN_REDACTED"
-)
-BABYBUDDY_CHILD_ID = int(os.environ.get("BABYBUDDY_CHILD_ID", "1"))
+# Kept beside the script by default: in a container the script directory is the bind mount, so the session survives the container being recreated.
+TOKEN_CACHE = Path(os.environ.get("PROCARE_TOKEN_CACHE") or SCRIPT_DIR / ".procare-token.json")
+
+BABYBUDDY_URL = os.environ.get("BABYBUDDY_URL").rstrip("/")
+
+BABYBUDDY_TOKEN = os.environ.get("BABYBUDDY_TOKEN", "")
+BABYBUDDY_CHILD_ID = int(os.environ.get("BABYBUDDY_CHILD_ID"))
 BABYBUDDY_TAG = os.environ.get("BABYBUDDY_TAG", "daycare")
 
-# Bottles at daycare are whatever we send in; Procare rarely fills in
-# data.bottle_type, so this is the fallback.
-BOTTLE_TYPE = os.environ.get("BABYBUDDY_BOTTLE_TYPE", "formula")
+# Bottles at daycare are whatever we send in; Procare rarely fills in data.bottle_type, so this is the fallback.
+BOTTLE_TYPE = os.environ.get("BABYBUDDY_BOTTLE_TYPE", "breast milk")
 
-# A merged nap longer than this is almost certainly a mis-paired
-# start/end rather than a real sleep, so it is reported instead of stored.
+# A merged nap longer than this is almost certainly a mis-paired start/end rather than a real sleep, so it is reported instead of stored.
 MAX_NAP = timedelta(hours=float(os.environ.get("MAX_NAP_HOURS", "6")))
 
-# Baby Buddy endpoints that hold the imported records, and the Procare
-# UUID marker that makes re-running the import a no-op.
+# Baby Buddy endpoints that hold the imported records, and the Procare UUID marker that makes re-running the import a no-op.
 IMPORT_ENDPOINTS = ("changes", "feedings", "sleep", "notes")
 PROCARE_ID_RE = re.compile(r"\[Procare ID: ([0-9a-fA-F-]{36})\]")
 
