@@ -1,1 +1,7 @@
 /__pycache__/
+
+# Holds a live Procare session token.
+.procare-token.json
+
+# Saved Procare API responses: real activity data, names and photo URLs.
+activity*.json
