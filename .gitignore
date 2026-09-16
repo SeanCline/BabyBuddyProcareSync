@@ -1,10 +1,10 @@
 /__pycache__/
 
-# Holds a live Procare session token.
+# Holds a live Procare session token. This is a secret so it needs to stay out of the repo.
 .procare-token.json
 
 # Videos pulled out of Procare before their links expire.
 /videos/
 
-# Saved Procare API responses: real activity data, names and photo URLs.
-activity*.json
+# JSON files and documentation used during development.
+/reference/
