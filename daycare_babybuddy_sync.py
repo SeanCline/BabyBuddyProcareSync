@@ -33,7 +33,11 @@ import requests
 # Configuration
 # ---------------------------------------------------------------------------
 
-PROCARE_API = os.environ.get("PROCARE_API", "https://api-school.procareconnect.com/api/web/")
+# The app's own API. The parallel /api/web/ namespace serves the same activities but rejects tokens from the sign-in below, which is the one that can register for push.
+PROCARE_API = os.environ.get("PROCARE_API", "https://api-school.procareconnect.com/api/mobile/")
+
+# Sign-in lives on its own host, and hands back a token the API above accepts.
+PROCARE_AUTH_API = os.environ.get("PROCARE_AUTH_API", "https://online-auth.procareconnect.com/")
 PROCARE_EMAIL = os.environ.get("PROCARE_EMAIL")
 PROCARE_PASSWORD = os.environ.get("PROCARE_PASSWORD")
 PROCARE_TOKEN = os.environ.get("PROCARE_TOKEN")
@@ -71,6 +75,12 @@ IMPORT_ENDPOINTS = ("changes", "feedings", "sleep", "notes")
 PROCARE_ID_RE = re.compile(r"\[Procare ID: ([0-9a-fA-F-]{36})\]")
 
 
+# Procare's notes and notification text carry emoji, which a Windows console in its default code page raises on rather than prints.
+for _stream in (sys.stdout, sys.stderr):
+    with suppress(AttributeError, ValueError):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def log(message):
     print(message)
 
@@ -91,7 +101,11 @@ class ProcareClient:
     needs a token is called, which keeps --from-file runs offline.
     """
 
-    def __init__(self):
+    def __init__(self, device=None):
+        # A push device (from procare_fcm) subscribes every sign-in this
+        # client makes to Procare's notifications.
+        self.device = device
+
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 Procare-BabyBuddy-Importer",
@@ -138,6 +152,13 @@ class ProcareClient:
         self._use_token(self._login(), "sign-in")
 
     def _login(self):
+        """
+        Exchange credentials for a session token.
+
+        Signing in with a push device subscribes the session to Procare's
+        notifications, which is exactly what the phone app does here.
+        """
+
         email = PROCARE_EMAIL
         password = PROCARE_PASSWORD
 
@@ -152,9 +173,21 @@ class ProcareClient:
             email = email or input("Procare email: ").strip()
             password = password or getpass.getpass("Procare password: ")
 
+        credentials = {
+            "email": email,
+            "password": password,
+            # What the app sends: a parent signing in from an Android phone.
+            "role": "carer",
+            "platform": "android",
+        }
+
+        if self.device:
+            credentials["fcm_token"] = self.device["token"]
+            credentials["device_token"] = self.device["android_id"]
+
         response = self.session.post(
-            f"{PROCARE_API}auth/",
-            json={"email": email, "password": password},
+            f"{PROCARE_AUTH_API}sessions",
+            json=credentials,
             timeout=30,
         )
 
@@ -178,7 +211,7 @@ class ProcareClient:
                 f"response keys: {sorted(payload)}"
             )
 
-        write_cached_token(token)
+        write_cached_token(token, self.device["token"] if self.device else None)
 
         return token
 
@@ -271,16 +304,35 @@ class ProcareClient:
             params["page"] += 1
 
 
-def read_cached_token():
+def read_cached_session():
     try:
-        return json.loads(TOKEN_CACHE.read_text())["token"]
-    except (OSError, ValueError, KeyError):
-        return None
+        return json.loads(TOKEN_CACHE.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
-def write_cached_token(token):
+def read_cached_token():
+    return read_cached_session().get("token")
+
+
+def cached_session_subscribes(device):
+    """
+    Whether the cached session is already receiving this device's pushes.
+
+    Push subscription is made at sign-in and belongs to the session, so a
+    restart only has to sign in again when the session is gone or was
+    signed in with some other device.
+    """
+
+    cached = read_cached_session()
+
+    return bool(cached.get("token")) and cached.get("fcm_token") == device["token"]
+
+
+def write_cached_token(token, fcm_token=None):
     payload = {
         "token": token,
+        "fcm_token": fcm_token,
         "saved_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -864,6 +916,21 @@ def sync(activities, procare, dry_run=False):
     log(f"Duplicate:  {duplicates}")
 
 
+def import_window(procare, start, end, dry_run=False):
+    """
+    Fetch a window of Procare activities and import them.
+    """
+
+    window = start if start == end else f"{start} to {end}"
+
+    log(f"Fetching Procare activities for {window}...")
+    activities = procare.activities(start, end)
+
+    log(f"Found {len(activities)} Procare activities.")
+
+    sync(activities, procare, dry_run=dry_run)
+
+
 def describe(entry):
     """
     A compact, one-record-per-line view of a --dry-run entry.
@@ -1020,15 +1087,9 @@ def main():
         # that a fixture from any day is still usable for testing.
         pinned = bool(args.date or args.start or args.end)
         activities = load_file(args.from_file, (start, end) if pinned else None)
+        sync(activities, procare, dry_run=args.dry_run)
     else:
-        window = start if start == end else f"{start} to {end}"
-
-        log(f"Fetching Procare activities for {window}...")
-        activities = procare.activities(start, end)
-
-        log(f"Found {len(activities)} Procare activities.")
-
-    sync(activities, procare, dry_run=args.dry_run)
+        import_window(procare, start, end, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

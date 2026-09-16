@@ -1,34 +1,42 @@
 # Procare to Baby Buddy importer.
 #
-# The importer (procare-sync) remains stopped, consuming no ram until the scheduler (procare-scheduler), starts it on a cron.
+# One container that stays up. It holds a socket open to Firebase and
+# imports as soon as Procare says something happened, falling back to a
+# poll every WATCH_POLL_MINUTES so nothing depends on a push arriving.
 #
 # Before deploying:
-#   1. Copy daycare_babybuddy_sync.py to the Docker host, e.g. /opt/procare
+#   1. Copy the .py files to the Docker host, e.g. /opt/procare
 #   2. Set PROCARE_DIR (and optionally the rest) in Portainer's "Environment variables" box when you deploy the stack.
 #
-# Logs for every run:  docker logs -f procare-scheduler
+# Logs:  docker logs -f procare-sync
 
 services:
-  procare-sync: # The importer. Runs once at deploy, then only when the scheduler says.
+  procare-sync:
     image: python:3.14-slim
-    container_name: procare-sync    
-    restart: "no" # Never restart automatically, letting the scheduler queue up the next run.
+    container_name: procare-sync
+    restart: unless-stopped
 
     environment:
       TZ: ${TZ:-America/New_York}
       PYTHONUNBUFFERED: "1"
 
-      # requests is installed once into the procare-deps volume.
+      # Dependencies are installed once into the procare-deps volume.
       PYTHONPATH: /deps
 
       # Procare settings.
       PROCARE_EMAIL: ${PROCARE_EMAIL:-}
       PROCARE_PASSWORD: ${PROCARE_PASSWORD:-}
       PROCARE_TOKEN_CACHE: ${PROCARE_TOKEN_CACHE:-} # The token is cached beside the script by default so it survives this container being recreated.
+      PROCARE_FCM_API_KEY: ${PROCARE_FCM_API_KEY:-} # Procare's own Firebase key, which registering for push needs. See the README.
+      PROCARE_FCM_CACHE: ${PROCARE_FCM_CACHE:-} # As is the push device registration, which should be kept rather than repeated.
       PROCARE_KID_ID: ${PROCARE_KID_ID:-}
       PROCARE_VIDEO_DIR: ${PROCARE_VIDEO_DIR:-} # Videos are saved beside the script by default, on the same bind mount.
 
-      # How much of the past each run re-reads. Dates pin the window instead: SYNC_START_DATE / SYNC_END_DATE.
+      # How long an activity can go unnoticed when no push arrives for it.
+      WATCH_POLL_MINUTES: ${WATCH_POLL_MINUTES:-60}
+      WATCH_SETTLE_SECONDS: ${WATCH_SETTLE_SECONDS:-30}
+
+      # How much of the past each import re-reads. Dates pin the window instead: SYNC_START_DATE / SYNC_END_DATE.
       SYNC_DAYS_BACK: ${SYNC_DAYS_BACK:-1}
       SYNC_START_DATE: ${SYNC_START_DATE:-}
       SYNC_END_DATE: ${SYNC_END_DATE:-}
@@ -42,62 +50,18 @@ services:
       MAX_NAP_HOURS: ${MAX_NAP_HOURS:-6}
 
     volumes:
-      # Read-write because the Procare token is cached in here.
+      # Read-write: the session token, the push registration and the videos all live in here.
       - ${PROCARE_DIR:-/opt/procare}:/app
       - procare-deps:/deps
 
-    # pip runs only on the first run after the volume is created; later
-    # runs find requests already on PYTHONPATH and go straight to work.
+    # pip runs only on the first start after the volume is created; later
+    # starts find the packages on PYTHONPATH and go straight to work.
     command:
       - sh
       - -c
       - |
-        python -c 'import requests' 2>/dev/null || pip install --quiet --no-cache-dir --target /deps requests
-        exec python /app/daycare_babybuddy_sync.py
-
-
-  # ---------------------------------------------------------------------
-  # The scheduler: the only thing that stays running.
-  # ---------------------------------------------------------------------
-  procare-scheduler:
-    image: mcuadros/ofelia:latest
-    container_name: procare-scheduler
-    restart: unless-stopped
-    depends_on:
-      - procare-sync
-
-    # Needed to start procare-sync. Ofelia only ever starts that one container, but this socket is full control of the Docker host.
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
-    environment:
-      TZ: ${TZ:-America/New_York}
-
-    # Ofelia's config file, written at startup so this stack stays a
-    # single importable file. Schedules are 6-field cron (robfig/cron v1):
-    # second minute hour day-of-month month day-of-week.
-    #
-    #   0 */10 8-16 * * 1-5   every 10 min, 08:00-16:50, Mon-Fri
-    #   0 0 17 * * 1-5        one final run at 17:00 to catch sign-out
-    #
-    # "container" starts the existing procare-sync container instead of
-    # creating one, so the run inherits the volumes and environment above
-    # and is never deleted afterwards.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        mkdir -p /etc/ofelia
-        cat > /etc/ofelia/config.ini <<'INI'
-        [job-run "procare-sync"]
-        schedule = 0 */10 8-16 * * 1-5
-        container = procare-sync
-
-        [job-run "procare-sync-final"]
-        schedule = 0 0 17 * * 1-5
-        container = procare-sync
-        INI
-        exec /usr/bin/ofelia daemon --config /etc/ofelia/config.ini
+        python -c 'import firebase_messaging' 2>/dev/null || pip install --quiet --no-cache-dir --target /deps requests firebase-messaging
+        exec python /app/scripts/procare_watch.py
 
 
 volumes:

@@ -83,11 +83,20 @@ same note, so the two still match up.
 
 ## Requirements
 
-Python 3.9+ and [`requests`](https://pypi.org/project/requests/):
+Python 3.9+ and [`requests`](https://pypi.org/project/requests/) for the
+import. Watching for push notifications also needs
+[`firebase-messaging`](https://pypi.org/project/firebase-messaging/):
 
 ```sh
-pip install requests
+pip install requests firebase-messaging
 ```
+
+| File | What it is |
+| --- | --- |
+| `daycare_babybuddy_sync.py` | The import. Runs standalone, needs only `requests` |
+| `procare_fcm.py` | Registers with Firebase as an Android device and receives the pushes |
+| `scripts/procare_watch.py` | Long-running service: imports on a push, and on a timer regardless |
+| `scripts/push_probe.py` | Diagnostic: logs incoming notifications and flags unexpected ones |
 
 ## Configuration
 
@@ -104,19 +113,30 @@ Everything is read from the environment.
 | `BABYBUDDY_TAG` | no | `daycare` | Tag applied to every imported record |
 | `BABYBUDDY_BOTTLE_TYPE` | no | `breast milk` | Used when Procare doesn't say what was in the bottle |
 | `MAX_NAP_HOURS` | no | `6` | Above this, a merged nap is treated as mis-paired |
+| `WATCH_POLL_MINUTES` | no | `60` | `procare_watch.py`: longest gap between imports when nothing pushes |
+| `WATCH_SETTLE_SECONDS` | no | `30` | How long to let a burst of pushes finish before importing |
 | `PROCARE_EMAIL` | no | — | Procare login; also prompted for interactively |
 | `PROCARE_PASSWORD` | no | — | As above |
 | `PROCARE_TOKEN` | no | — | Use an existing session token instead of signing in |
 | `PROCARE_TOKEN_CACHE` | no | `.procare-token.json` beside the script | Where the session token is cached |
 | `PROCARE_VIDEO_DIR` | no | `videos/` beside the script | Where videos are saved; created if missing |
+| `PROCARE_FCM_API_KEY` | for push | — | Procare's Firebase key, recovered from their APK (below) |
+| `PROCARE_FCM_CACHE` | no | `.procare-fcm.json` beside the script | Where the push device registration is cached |
 | `PROCARE_KID_ID` | no | auto | Discovered automatically when the account has one child |
-| `PROCARE_API` | no | Procare's API | Override the API base URL |
+| `PROCARE_API` | no | Procare's mobile API | Override the API base URL |
+| `PROCARE_AUTH_API` | no | Procare's auth host | Override where sign-in happens |
 
 ### Signing in
 
 The first run signs in and caches the session token, so later runs need no
 credentials. Credentials come from `$PROCARE_EMAIL` / `$PROCARE_PASSWORD`, or
 an interactive prompt when neither is set.
+
+Sign-in posts to Procare's auth host, which is separate from the API host and
+hands back a token the API accepts. It is the same call the phone app makes,
+including the `fcm_token` that subscribes a device to push notifications when
+`procare_watch.py` supplies one. Procare also serves these activities under an
+`/api/web/` namespace, but that one rejects tokens from this sign-in.
 
 If the cached token expires, the next run signs in again and retries. Where
 that isn't possible — no credentials and no terminal, as in a container — the
@@ -177,41 +197,81 @@ Imported:   1
 Duplicate:  1
 ```
 
-## Running it on a schedule
+## Running it as a service
 
-`procare_sync.yaml` is a Compose stack (built for Portainer) that runs the
-import every 10 minutes on weekdays between 08:00 and 17:00.
+`scripts/procare_watch.py` imports when daycare logs something, instead of asking
+every few minutes whether they have.
 
-The importer is deliberately **not** a long-running service. `procare-sync`
-sits stopped between runs, holding no memory; a small
-[ofelia](https://github.com/mcuadros/ofelia) container is the only resident
-process, and it starts the existing importer container on a cron. Each run
-does its work, prints its summary and exits.
+Procare's phone app receives push notifications through Firebase Cloud
+Messaging, and `procare_fcm.py` registers with Firebase the way that app does:
+a device check-in, a Firebase installation, then a registration for Procare's
+sender id. The resulting token is handed to Procare at sign-in — its login
+takes an `fcm_token`, which is exactly how the app subscribes a phone — and
+from then on this device gets the same notifications.
 
-To deploy:
+A push carries no useful detail, only that something happened, so it is used
+as a hint: wait `$WATCH_SETTLE_SECONDS` for the rest of the burst to land, then
+run the ordinary import over the configured window.
 
-1. Copy `daycare_babybuddy_sync.py` to the Docker host, e.g. `/opt/procare`.
-2. Add the stack in Portainer, setting at least `PROCARE_DIR`, `BABYBUDDY_URL`,
-   `BABYBUDDY_TOKEN` and `BABYBUDDY_CHILD_ID` in the environment variables box.
+**Nothing depends on a push arriving.** An import runs at least every
+`$WATCH_POLL_MINUTES` (default 60) whatever happens, so a dropped socket, a
+revoked token or an activity Procare simply does not notify about costs a
+delay, never a missing record. An import that fails is logged and the watch
+carries on.
 
-Output from every run appears in the scheduler's logs, because ofelia captures
-the container's output:
+The registration is cached in `.procare-fcm.json` beside the script and reused,
+since each registration is a device that shows up on Procare's side.
+
+### Procare's Firebase key
+
+Registering needs Procare's own Firebase API key. It is not in this repository:
+it belongs to Procare rather than to us, and a public copy of someone else's
+credential attracts scanners even when — as here — it is a project identifier
+that ships inside every install of their app rather than anything secret.
+
+Recover it from the Procare APK and set `$PROCARE_FCM_API_KEY`:
 
 ```sh
-docker logs -f procare-scheduler
+unzip -p Procare.apk resources.arsc | grep -ao 'AIza[A-Za-z0-9_-]\{35\}'
 ```
 
-The schedule lives in the ofelia config generated inside the stack file, as
-6-field cron (`second minute hour day month weekday`):
+The other identifiers in `procare_fcm.py` — project, app id, sender id, package,
+signing certificate — come from the same APK and are checked in, since nothing
+treats them as credentials. If Procare rotates the key, registration fails with
+a message naming this variable; existing registrations keep working.
 
-```ini
-schedule = 0 */10 8-16 * * 1-5   # every 10 min, 08:00–16:50, Mon–Fri
-schedule = 0 0 17 * * 1-5        # a final run at 17:00 to catch sign-out
+### Deploying
+
+`procare_sync.yaml` is a Compose stack (built for Portainer) holding one
+container that stays up. To deploy:
+
+1. Copy the repository to the Docker host, e.g. `/opt/procare`, keeping
+   `scripts/` beside the two modules — the scripts import them from there.
+2. Add the stack in Portainer, setting at least `PROCARE_DIR`, `PROCARE_EMAIL`,
+   `PROCARE_PASSWORD`, `BABYBUDDY_URL`, `BABYBUDDY_TOKEN` and
+   `BABYBUDDY_CHILD_ID` in the environment variables box.
+
+```sh
+docker logs -f procare-sync
 ```
 
-The scheduler needs `/var/run/docker.sock` in order to start the importer
-container. That is full control of the Docker daemon, which is the trade for
-not keeping a Python process resident between runs.
+The container idles on an open socket to Firebase rather than sitting stopped
+between runs, which costs a resident Python process — the price of hearing
+about a nap when it happens rather than up to ten minutes later.
+
+### What actually pushes
+
+`scripts/push_probe.py` listens and writes every notification to
+`push-log.jsonl`,
+flagging anything whose shape differs from what the app's own code expects:
+
+```sh
+python scripts/push_probe.py --hours 9
+```
+
+Run it for a day to learn which activities Procare really notifies about. It
+signs in the same way, so don't run it alongside `procare_watch.py` — both
+would connect to Firebase as the same device.
 
 ## License
 

@@ -1,7 +1,13 @@
-/__pycache__/
+__pycache__/
 
 # Holds a live Procare session token. This is a secret so it needs to stay out of the repo.
 .procare-token.json
+
+# The push device registration: a credential, like the token above.
+.procare-fcm.json
+
+# What push_probe.py records: daycare notification text.
+push-log.jsonl
 
 # Videos pulled out of Procare before their links expire.
 /videos/
