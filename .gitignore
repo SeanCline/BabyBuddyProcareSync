@@ -3,5 +3,8 @@
 # Holds a live Procare session token.
 .procare-token.json
 
+# Videos pulled out of Procare before their links expire.
+/videos/
+
 # Saved Procare API responses: real activity data, names and photo URLs.
 activity*.json

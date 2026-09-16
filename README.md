@@ -15,6 +15,7 @@ each run reads those back before writing anything.
 | `bottle_activity` | Feeding | Bottle, amount in oz, type from Procare or `$BABYBUDDY_BOTTLE_TYPE` |
 | `nap_activity` (×2) | Sleep | A start and an end record merged into one nap — see below |
 | `photo_activity` | Note | The photo is downloaded and attached to the note |
+| `video_activity` | Note | The still frame is attached; the video is saved to `videos/` — see below |
 | `sign_in_activity` | Note | "Signed in by …", with the room |
 | `sign_out_activity` | Note | "Signed out by …", with the room |
 
@@ -47,6 +48,39 @@ Pairing is scoped to one calendar day, which means a nap crossing midnight is
 never paired — irrelevant for daycare hours, and it keeps a start from pairing
 with an unrelated day's end.
 
+## Videos
+
+A Baby Buddy note holds one image and nothing else, so a video becomes a note
+with its still frame attached, exactly like a photo. The video itself is
+downloaded to `videos/` beside the script — Procare's links to them are signed
+and expire within a few months, so this file ends up being the only lasting
+copy. The directory is created on first use and can be moved with
+`$PROCARE_VIDEO_DIR`.
+
+Files are named after the Procare activity, and a video already on disk is
+never fetched again:
+
+    videos/procare-0cc399e2-bacb-4e35-9741-916d958e92e1.mp4
+
+The note names the file, so a note and its video can always be matched up:
+
+    [Procare ID: 0cc399e2-bacb-4e35-9741-916d958e92e1]
+    Room: Bunnies Room
+    Leg work out! AP
+    Video: procare-0cc399e2-bacb-4e35-9741-916d958e92e1.mp4
+
+In the container `videos/` lands in the bind-mounted script directory, so the
+files outlive the container.
+
+If a download fails the note records the Procare link instead, and the next run
+tries the video again: archiving happens before the duplicate check, so an
+existing note is no reason to leave its video missing. Since each run only asks
+Procare for one day, those retries are the remaining runs of that day — after
+that, re-run the day by hand (`daycare_babybuddy_sync.py 2026-09-15`) while the
+link still works. A note written during the failure keeps the link in its text
+even once the file is saved; the file is named after the Procare ID in that
+same note, so the two still match up.
+
 ## Requirements
 
 Python 3.9+ and [`requests`](https://pypi.org/project/requests/):
@@ -64,6 +98,9 @@ Everything is read from the environment.
 | `BABYBUDDY_URL` | **yes** | — | Base URL, e.g. `http://baby.example.com:8000/` |
 | `BABYBUDDY_TOKEN` | **yes** | — | API key from Baby Buddy → User → Settings |
 | `BABYBUDDY_CHILD_ID` | **yes** | — | Numeric child id |
+| `SYNC_START_DATE` | no | — | First date to import; `YYYY-MM-DD`, `today` or `yesterday` |
+| `SYNC_END_DATE` | no | `today` | Last date to import |
+| `SYNC_DAYS_BACK` | no | `1` | Days of history before the end date, when no start is given |
 | `BABYBUDDY_TAG` | no | `daycare` | Tag applied to every imported record |
 | `BABYBUDDY_BOTTLE_TYPE` | no | `breast milk` | Used when Procare doesn't say what was in the bottle |
 | `MAX_NAP_HOURS` | no | `6` | Above this, a merged nap is treated as mis-paired |
@@ -71,6 +108,7 @@ Everything is read from the environment.
 | `PROCARE_PASSWORD` | no | — | As above |
 | `PROCARE_TOKEN` | no | — | Use an existing session token instead of signing in |
 | `PROCARE_TOKEN_CACHE` | no | `.procare-token.json` beside the script | Where the session token is cached |
+| `PROCARE_VIDEO_DIR` | no | `videos/` beside the script | Where videos are saved; created if missing |
 | `PROCARE_KID_ID` | no | auto | Discovered automatically when the account has one child |
 | `PROCARE_API` | no | Procare's API | Override the API base URL |
 
@@ -90,17 +128,42 @@ stay out of version control.
 ## Usage
 
 ```sh
-daycare_babybuddy_sync.py                      # import today
-daycare_babybuddy_sync.py 2026-08-17           # import a specific day
+daycare_babybuddy_sync.py                      # today and yesterday
+daycare_babybuddy_sync.py 2026-08-17           # one specific day
+daycare_babybuddy_sync.py --start 2026-08-10 --end 2026-08-17
+daycare_babybuddy_sync.py --days-back 7        # the last week, up to today
+daycare_babybuddy_sync.py --end yesterday --days-back 0
 daycare_babybuddy_sync.py --dry-run            # show what would be created
 daycare_babybuddy_sync.py --from-file day.json # replay a saved API response
 daycare_babybuddy_sync.py --login              # sign in again, replacing the cache
 ```
 
+### The date range
+
+Every run imports a window of days, and re-importing is free — records already
+in Baby Buddy are recognised and skipped — so the window can be as wide as is
+useful.
+
+Either end can be pinned with `--start` and `--end`, which take `YYYY-MM-DD`,
+`today` or `yesterday`. Whichever end is left open is filled in: `--end`
+defaults to today, and `--start` to `--days-back` days before the end. So
+`--days-back 7` means the last week, `--days-back 0` means the end date alone,
+and a bare date is shorthand for `--start DATE --end DATE`.
+
+The default is `--days-back 1`: today and yesterday. Yesterday is worth
+re-reading because daycare keeps writing after the last run of the evening, and
+a nap that ends after midnight is logged against the day it started.
+
+The same window can be set in the environment with `$SYNC_START_DATE`,
+`$SYNC_END_DATE` and `$SYNC_DAYS_BACK`, which is how the scheduled container
+does it. Command-line flags win over those. Pinning a start date and giving a
+day count is contradictory: the start date wins and the run says so.
+
 `--from-file` reads a saved Procare response (the JSON body of
 `/api/web/parent/daily_activities/`) instead of calling the API, which makes it
 easy to work on the conversion offline. Combined with `--dry-run` it touches
-nothing at all.
+nothing at all. A saved file is read whole unless the command line asks for
+particular dates, so a fixture from any day stays usable.
 
 A run prints one line per planned record:
 

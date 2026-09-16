@@ -26,6 +26,12 @@ services:
       PROCARE_PASSWORD: ${PROCARE_PASSWORD:-}
       PROCARE_TOKEN_CACHE: ${PROCARE_TOKEN_CACHE:-} # The token is cached beside the script by default so it survives this container being recreated.
       PROCARE_KID_ID: ${PROCARE_KID_ID:-}
+      PROCARE_VIDEO_DIR: ${PROCARE_VIDEO_DIR:-} # Videos are saved beside the script by default, on the same bind mount.
+
+      # How much of the past each run re-reads. Dates pin the window instead: SYNC_START_DATE / SYNC_END_DATE.
+      SYNC_DAYS_BACK: ${SYNC_DAYS_BACK:-1}
+      SYNC_START_DATE: ${SYNC_START_DATE:-}
+      SYNC_END_DATE: ${SYNC_END_DATE:-}
 
       # BabyBuddy settings.
       BABYBUDDY_URL: ${BABYBUDDY_URL:-}

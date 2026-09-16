@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 """
-Import a day of Procare daycare activities into Baby Buddy.
+Import Procare daycare activities into Baby Buddy.
 
-    daycare_babybuddy_sync.py                       # today
-    daycare_babybuddy_sync.py 2026-08-17 --dry-run
+    daycare_babybuddy_sync.py                       # today and yesterday
+    daycare_babybuddy_sync.py 2026-08-17 --dry-run  # one day
+    daycare_babybuddy_sync.py --start 2026-08-10 --end 2026-08-17
+    daycare_babybuddy_sync.py --days-back 7         # the last week
     daycare_babybuddy_sync.py --from-file activity.json --dry-run
     daycare_babybuddy_sync.py --login               # force a fresh sign-in
 
@@ -42,6 +44,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Kept beside the script by default: in a container the script directory is the bind mount, so the session survives the container being recreated.
 TOKEN_CACHE = Path(os.environ.get("PROCARE_TOKEN_CACHE") or SCRIPT_DIR / ".procare-token.json")
 
+# Baby Buddy has nowhere to keep a video, and Procare's links to them are signed and expire within months, so the files are pulled down to here instead.
+VIDEO_DIR = Path(os.environ.get("PROCARE_VIDEO_DIR") or SCRIPT_DIR / "videos")
+
 BABYBUDDY_URL = os.environ.get("BABYBUDDY_URL").rstrip("/")
 
 BABYBUDDY_TOKEN = os.environ.get("BABYBUDDY_TOKEN", "")
@@ -50,6 +55,13 @@ BABYBUDDY_TAG = os.environ.get("BABYBUDDY_TAG", "daycare")
 
 # Bottles at daycare are whatever we send in; Procare rarely fills in data.bottle_type, so this is the fallback.
 BOTTLE_TYPE = os.environ.get("BABYBUDDY_BOTTLE_TYPE", "breast milk")
+
+# The window to import. Dates may be YYYY-MM-DD or the words "today" and "yesterday"; SYNC_DAYS_BACK fills in a start that was not given.
+SYNC_START_DATE = os.environ.get("SYNC_START_DATE")
+SYNC_END_DATE = os.environ.get("SYNC_END_DATE")
+
+# One day of history by default: daycare keeps logging after the last run of the evening, and a nap that ends after midnight belongs to the day before.
+SYNC_DAYS_BACK = int(os.environ.get("SYNC_DAYS_BACK") or 1)
 
 # A merged nap longer than this is almost certainly a mis-paired start/end rather than a real sleep, so it is reported instead of stored.
 MAX_NAP = timedelta(hours=float(os.environ.get("MAX_NAP_HOURS", "6")))
@@ -231,17 +243,17 @@ class ProcareClient:
             f"{len(kids)} children:\n{listing}"
         )
 
-    def activities(self, day):
+    def activities(self, start, end):
         """
-        Every daily activity Procare recorded for a single day.
+        Every daily activity Procare recorded between two dates, inclusive.
         """
 
         params = {
             "kid_id": self.kid_id,
             # date_from matters: with only date_to, Procare returns
             # everything up to that date.
-            "filters[daily_activity][date_from]": day.isoformat(),
-            "filters[daily_activity][date_to]": day.isoformat(),
+            "filters[daily_activity][date_from]": start.isoformat(),
+            "filters[daily_activity][date_to]": end.isoformat(),
             "page": 1,
         }
 
@@ -395,6 +407,51 @@ class BabyBuddyClient:
         )
 
 
+# Procare serves whatever the phone recorded; anything unrecognised is far
+# more likely to be MP4 than not.
+VIDEO_EXTENSIONS = {
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/3gpp": ".3gp",
+    "video/x-matroska": ".mkv",
+}
+
+
+def archive_video(entry, procare):
+    """
+    Save an entry's video to VIDEO_DIR and return the note line naming it.
+
+    Baby Buddy only stores the still frame, so this file is the only copy
+    of the video that outlives Procare's signed link - and if it can't be
+    fetched, that link still beats recording nothing.
+    """
+
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+    stem = f"procare-{entry.procare_ids[0]}"
+    existing = next(VIDEO_DIR.glob(f"{stem}.*"), None)
+
+    if existing:
+        return f"Video: {existing.name}"
+
+    log("         downloading video...")
+
+    try:
+        content, content_type = procare.download(entry.video_url)
+    except requests.RequestException as error:
+        warn(f"could not download video {entry.procare_ids[0]}: {error}")
+        return f"Video: {entry.video_url}"
+
+    media_type = (content_type or "").split(";")[0].strip().lower()
+    path = VIDEO_DIR / f"{stem}{VIDEO_EXTENSIONS.get(media_type, '.mp4')}"
+
+    path.write_bytes(content)
+
+    log(f"         saved {path.name} ({len(content) // 1024} KiB)")
+
+    return f"Video: {path.name}"
+
+
 def image_extension(content_type):
     for candidate in (".png", ".webp", ".gif"):
         if candidate.strip(".") in (content_type or ""):
@@ -426,6 +483,7 @@ class Entry:
     note: str
     fields: dict = field(default_factory=dict)
     photo_url: str = None
+    video_url: str = None
 
     def payload(self):
         return {
@@ -528,8 +586,16 @@ def convert_bottle(activity):
     )
 
 
-def convert_photo(activity):
-    caption = (activity.get("activiable") or {}).get("caption")
+def convert_media(activity):
+    """
+    Photos and videos both become notes. Procare hands back a still frame
+    for either, so that is what gets attached to the note; a video's own
+    file is saved to VIDEO_DIR by archive_video().
+    """
+
+    media = activity.get("activiable") or {}
+    is_video = activity["activity_type"] == "video_activity"
+    video_url = media.get("video_file_url") if is_video else None
 
     return Entry(
         endpoint="notes",
@@ -539,10 +605,11 @@ def convert_photo(activity):
         note=build_note(
             [activity],
             *context_of(activity),
-            caption or "Daycare photo",
+            media.get("caption") or ("Daycare video" if is_video else "Daycare photo"),
         ),
         fields={"time": activity["activity_time"]},
         photo_url=activity.get("photo_url"),
+        video_url=video_url,
     )
 
 
@@ -579,7 +646,8 @@ def convert_sign_in_out(activity):
 CONVERTERS = {
     "bathroom_activity": convert_diaper,
     "bottle_activity": convert_bottle,
-    "photo_activity": convert_photo,
+    "photo_activity": convert_media,
+    "video_activity": convert_media,
     "sign_in_activity": convert_sign_in_out,
     "sign_out_activity": convert_sign_in_out,
     # nap_activity is handled by pair_naps(), which spans two activities.
@@ -753,6 +821,17 @@ def sync(activities, procare, dry_run=False):
 
     log(f"Baby Buddy already holds {len(known_ids)} imported activities.")
 
+    # Videos are archived for every entry, not just the new ones: a note
+    # that already exists can still be missing its video, from a download
+    # that failed on an earlier run, and the Procare link it came from
+    # expires. Files already on disk are left alone.
+    if not dry_run:
+        for entry in entries:
+            if entry.video_url:
+                entry.note = build_note(
+                    [], entry.note, archive_video(entry, procare)
+                )
+
     imported = 0
     duplicates = 0
 
@@ -806,16 +885,62 @@ def describe(entry):
     if entry.photo_url:
         fields += " photo=yes"
 
+    if entry.video_url:
+        fields += " video=yes"
+
     return f"         {fields}" + (f"\n         {context}" if context else "")
 
 
-def load_file(path, day):
+def parse_day(value):
+    """
+    A date written as YYYY-MM-DD, or as "today" or "yesterday".
+    """
+
+    text = value.strip().lower()
+
+    if text == "today":
+        return date.today()
+
+    if text == "yesterday":
+        return date.today() - timedelta(days=1)
+
+    return date.fromisoformat(text)
+
+
+def sync_range(start=None, end=None, days_back=None):
+    """
+    The dates to import, inclusive, from whichever end was pinned down.
+
+    A start date wins where it is given; otherwise the window is that many
+    days of history ending at the end date, which leaves the ordinary case
+    - the last day or two, up to today - needing no dates at all.
+    """
+
+    end = end or parse_day(SYNC_END_DATE or "today")
+    start = start or (parse_day(SYNC_START_DATE) if SYNC_START_DATE else None)
+
+    if start and days_back is not None:
+        warn("a start date and a day count were both given; using the start date.")
+
+    if not start:
+        start = end - timedelta(days=SYNC_DAYS_BACK if days_back is None else days_back)
+
+    if start > end:
+        sys.exit(f"Start date {start} is after end date {end}.")
+
+    return start, end
+
+
+def load_file(path, window=None):
     payload = json.loads(Path(path).read_text())
     activities = payload.get("daily_activities", [])
 
-    if day:
+    if window:
+        start, end = window
         activities = [
-            a for a in activities if a.get("activity_date") == day.isoformat()
+            a
+            for a in activities
+            if start.isoformat() <= (a.get("activity_date") or "") <= end.isoformat()
         ]
 
     dates = sorted({a.get("activity_date") for a in activities})
@@ -838,7 +963,23 @@ def main():
     parser.add_argument(
         "date",
         nargs="?",
-        help="Date to import (YYYY-MM-DD). Defaults to today.",
+        help="A single date to import, short for --start DATE --end DATE.",
+    )
+    parser.add_argument(
+        "--start",
+        metavar="DATE",
+        help="First date to import. Defaults to --days-back before the end.",
+    )
+    parser.add_argument(
+        "--end",
+        metavar="DATE",
+        help="Last date to import. Defaults to today.",
+    )
+    parser.add_argument(
+        "--days-back",
+        type=int,
+        metavar="N",
+        help=f"Days of history to import before the end date (default {SYNC_DAYS_BACK}).",
     )
     parser.add_argument(
         "--dry-run",
@@ -858,13 +999,16 @@ def main():
 
     args = parser.parse_args()
 
-    day = None
+    if args.date and (args.start or args.end):
+        parser.error("Give a single date or --start/--end, not both.")
 
-    if args.date:
-        try:
-            day = date.fromisoformat(args.date)
-        except ValueError:
-            parser.error("Date must be YYYY-MM-DD")
+    try:
+        start = parse_day(args.start or args.date) if (args.start or args.date) else None
+        end = parse_day(args.end or args.date) if (args.end or args.date) else None
+    except ValueError:
+        parser.error("Dates must be YYYY-MM-DD, today or yesterday.")
+
+    start, end = sync_range(start, end, args.days_back)
 
     procare = ProcareClient()
 
@@ -872,12 +1016,15 @@ def main():
         procare.sign_in()
 
     if args.from_file:
-        activities = load_file(args.from_file, day)
+        # A saved response is read whole unless dates were asked for, so
+        # that a fixture from any day is still usable for testing.
+        pinned = bool(args.date or args.start or args.end)
+        activities = load_file(args.from_file, (start, end) if pinned else None)
     else:
-        day = day or date.today()
+        window = start if start == end else f"{start} to {end}"
 
-        log(f"Fetching Procare activities for {day}...")
-        activities = procare.activities(day)
+        log(f"Fetching Procare activities for {window}...")
+        activities = procare.activities(start, end)
 
         log(f"Found {len(activities)} Procare activities.")
 
